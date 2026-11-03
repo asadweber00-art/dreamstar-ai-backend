@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dreamstar AI Studio</title><link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="brandmark">D</div><div><b>DREAMSTAR</b><small>AI STUDIO</small></div></div>
+    <div class="navlabel">WORKSPACE</div>
+    <button class="nav active">✦ <span>AI Video Creator</span></button>
+    <button class="nav" id="libraryNav">▧ <span>My Creations</span></button>
+    <div class="sidebottom">
+      <div class="status"><i></i><div><b>Studio ready</b><small>Local workspace</small></div></div>
+      <button class="nav" id="settingsNav">⚙ <span>Generation settings</span></button>
+    </div>
+  </aside>
+  <main>
+    <header><div><div class="eyebrow">DREAMSTAR ENTERTAINMENT</div><h1>Bring your stories to life.</h1><p>Create visual scenes for your next animated adventure.</p></div><div class="avatar">DS</div></header>
+    <section class="workspace">
+      <div class="formcol">
+        <div class="sectionhead"><div><span class="step">01</span><h2>Describe your scene</h2></div><span class="tag">TEXT TO VIDEO</span></div>
+        <label for="prompt">What should happen in your video?</label>
+        <textarea id="prompt" placeholder="Example: Sheru and Bunty race through a colourful futuristic city at sunset. Cinematic 3D animation, expressive faces, smooth character movement..."></textarea>
+        <div class="under"><span>Be descriptive: characters, action, setting, camera and mood.</span><span id="count">0 characters · no app limit</span></div>
+        <div class="sectionhead uploadhead"><div><span class="step">02</span><h2>Reference image <em>(optional)</em></h2></div></div>
+        <label class="dropzone" for="imageInput" id="dropzone">
+          <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp">
+          <div class="uploadicon">＋</div><b>Upload a character or scene image</b><small>PNG, JPG or WEBP · up to 10 MB</small>
+          <img id="preview" alt="Reference preview">
+        </label>
+        <div class="sectionhead optionshead"><div><span class="step">03</span><h2>Video settings</h2></div></div>
+        <div class="options">
+          <div><label for="ratio">Aspect ratio</label><select id="ratio"><option value="16:9">16:9 · Landscape</option><option value="9:16">9:16 · Shorts</option><option value="1:1">1:1 · Square</option></select></div>
+          <div><label for="duration">Scene clip length</label><select id="duration"><option value="5">5 seconds</option><option value="10">10 seconds</option><option value="15">15 seconds</option><option value="30">30 seconds</option></select></div>
+          <div><label for="storyDuration">Full story target</label><select id="storyDuration"><option value="1">1 minute</option><option value="5">5 minutes</option><option value="10">10 minutes</option><option value="15">15 minutes</option><option value="20">20 minutes</option><option value="30" selected>30 minutes</option></select></div>
+          <div><label for="quality">Output target</label><select id="quality"><option value="720p">HD · 720p</option><option value="1080p">Full HD · 1080p (if supported)</option></select></div>
+        </div>
+        <button class="generate" id="generate">✦ <span>Generate video</span><b>→</b></button>
+        <p class="fineprint">A 30-minute story requires a backend that creates and joins many short scenes. The selected story duration is a target, not a guarantee; this app will never pretend a video was generated when no engine is connected.</p>
+      </div>
+      <div class="previewcol">
+        <div class="previewtop"><h2>Studio preview</h2><span class="live"><i></i> READY</span></div>
+        <div class="canvas" id="canvas">
+          <div class="orb orb1"></div><div class="orb orb2"></div>
+          <div class="playmark">✦</div><div class="canvastext"><b>Your next scene starts here</b><span>Describe an idea or add a reference image.</span></div>
+          <img id="canvasImage" alt="">
+        </div>
+        <div class="resultbox" id="resultbox"><div class="resulticon">✧</div><div><b>No video generated yet</b><span>Your finished clips will appear here.</span></div></div>
+        <div class="tip"><b>✧ Character consistency tip</b><p>Use the same clear character reference image for every scene. Keep names, clothing and appearance details consistent in your prompts.</p></div>
+      </div>
+    </section>
+    <footer>Dreamstar AI Studio <span>Creative workspace · Early build</span></footer>
+  </main>
+</div>
+<div class="modal" id="settingsModal"><div class="modalcard"><button class="close" id="closeSettings">×</button><div class="eyebrow">CONNECT YOUR ENGINE</div><h2>Generation settings</h2><p>Connect to your own secure backend. Keep the Hugging Face token on the backend only; never paste it into this website.</p><label>Backend API URL</label><input id="apiUrl" placeholder="https://YOUR-SPACE.hf.space/api/generate"><label>Backend access key (not your Hugging Face token)</label><input id="apiToken" type="password" placeholder="Enter your private backend access key"><button class="save" id="saveSettings">Save connection</button><small class="modalnote">The backend uses your Hugging Face token as a server-side secret. The first test supports text-to-video short clips only; reference-image generation and 30-minute single-shot video are not supported by this first backend. Provider access, credits and model availability may vary.</small></div></div>
+<script src="app.js"></script>
+</body></html>

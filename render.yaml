@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: dreamstar-ai-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ACCESS_KEY
+        sync: false
+      - key: HF_TOKEN
+        sync: false
