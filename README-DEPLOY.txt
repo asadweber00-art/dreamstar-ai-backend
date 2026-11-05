@@ -1,19 +1,21 @@
-Dreamstar AI Studio — Render backend starter
+DREAMSTAR AI STUDIO — BACKEND REPLACEMENT
 
-Repository files should be extracted (not uploaded as a ZIP file) into the GitHub repository.
+Upload these files to the backend repository, replacing the old backend files:
+- app.py
+- requirements.txt
+- Dockerfile
+- .dockerignore
+- README.md
+- README-DEPLOY.txt
 
-Backend deployment:
-- This package includes Dockerfile, app.py, requirements.txt, and render.yaml at repository root.
-- Create a Render Web Service from the GitHub repository.
-- Runtime: Docker (or let Render detect Dockerfile).
-- Add environment variables in Render dashboard:
-  APP_ACCESS_KEY = choose a long random secret of your own
-  HF_TOKEN = your Hugging Face token (never share it in chat or put it in frontend code)
-- Deploy, then open https://YOUR-RENDER-URL/health to check service health.
+Keep secrets OUT of GitHub. Add HF_TOKEN and APP_ACCESS_KEY in the host's private environment settings.
 
-IMPORTANT LIMITATIONS:
-- /health only confirms the server is running.
-- Video generation has NOT been tested and depends on Hugging Face provider/model availability and account credits.
-- The starter currently requests a short 81-frame video, not a full 30-minute finished story.
-- Do not claim this is a complete production app until a real generation request is tested.
-- The static website is in the site/ folder and should continue to be hosted separately (for example on Netlify).
+Health check: https://YOUR-HOST/health
+Generation endpoint: https://YOUR-HOST/api/generate
+
+In the website's Generation settings:
+API URL = https://YOUR-HOST/api/generate
+Access token = same value as APP_ACCESS_KEY
+
+HONEST STATUS:
+This package is prepared but not deployed or live-tested. It calls an external Hugging Face inference provider; free access and model availability are not guaranteed. The paused Hugging Face Space quota is not bypassed by these files. Do not delete the old repository/files until the replacement has been uploaded and its /health endpoint checked.
