@@ -1,269 +1,124 @@
-import base64
-import binascii
-import os
-import secrets
-import uuid
-import logging
-
+import os, uuid, json, time, shutil, subprocess, threading
 from pathlib import Path
 from typing import Optional
-
-from fastapi import FastAPI, Header, HTTPException, Request
+import requests
+from fastapi import FastAPI, Header, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-from huggingface_hub import InferenceClient
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("dreamstar")
+APP_KEY = os.getenv("APP_ACCESS_KEY", "")
+ENGINE_URL = os.getenv("ENGINE_API_URL", "").rstrip("/")
+ENGINE_TOKEN = os.getenv("ENGINE_ACCESS_TOKEN", "")
+OUT = Path(os.getenv("OUTPUT_DIR", "/data/generated"))
+OUT.mkdir(parents=True, exist_ok=True)
+JOBS = {}
+LOCK = threading.Lock()
 
-APP_DIR = Path(__file__).resolve().parent
-VIDEO_DIR = APP_DIR / "generated"
-VIDEO_DIR.mkdir(exist_ok=True)
-
-app = FastAPI(
-    title="DREAMSTAR AI STUDIO",
-    version="2.0.0"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
-)
+app = FastAPI(title="Dreamstar AI Studio Backend", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 class GenerateRequest(BaseModel):
-    prompt: str = Field(min_length=3, max_length=20000)
-    image: Optional[str] = None
-    imageName: Optional[str] = None
+    prompt: str = Field(min_length=3)
+    image: Optional[str] = None  # data:image/...;base64,...
     ratio: str = "16:9"
-    duration: int = Field(default=5, ge=1, le=10)
-    quality: str = "720p"
+    storyDurationMinutes: int = Field(default=1, ge=1, le=45)
+    quality: str = "1080p"
+    sceneSeconds: int = Field(default=10, ge=5, le=10)
 
+def auth(x_api_key: Optional[str]):
+    if APP_KEY and x_api_key != APP_KEY:
+        raise HTTPException(401, "Invalid API key")
 
-def check_auth(authorization):
-    expected = os.getenv("APP_ACCESS_KEY", "")
-    token = os.getenv("HF_TOKEN", "")
+def split_story(prompt: str, count: int):
+    # Keep the user's story intent while requesting a distinct continuous scene.
+    return [f"""Create scene {i+1} of {count} in one continuous cinematic 3D animated story.
+Maintain exactly the same character identities, faces, clothes, colors and visual style as previous scenes.
+Story and creative direction: {prompt}
+Scene {i+1}/{count}. Make this scene visually coherent and suitable for seamless editing.
+Do not add titles, subtitles, logos or watermarks.""" for i in range(count)]
 
-    if not expected or not token:
-        raise HTTPException(
-            status_code=503,
-            detail="Backend environment setup incomplete."
-        )
+def engine_generate(scene_prompt, image, ratio, seconds, quality):
+    if not ENGINE_URL:
+        raise RuntimeError("ENGINE_API_URL is not configured. Connect a real image-to-video/text-to-video engine first.")
+    payload = {"prompt": scene_prompt, "image": image, "ratio": ratio, "duration": seconds, "quality": quality}
+    headers = {"Content-Type": "application/json"}
+    if ENGINE_TOKEN:
+        headers["X-API-Key"] = ENGINE_TOKEN
+        headers["Authorization"] = f"Bearer {ENGINE_TOKEN}"
+    r = requests.post(ENGINE_URL, json=payload, headers=headers, timeout=1800)
+    r.raise_for_status()
+    data = r.json()
+    url = data.get("videoUrl") or data.get("video_url") or data.get("url")
+    if not url:
+        raise RuntimeError("Engine did not return videoUrl. This backend adapter expects a completed clip URL.")
+    clip = requests.get(url, timeout=1800)
+    clip.raise_for_status()
+    return clip.content
 
-    supplied = (authorization or "").strip()
-
-    if supplied.lower().startswith("bearer "):
-        supplied = supplied[7:].strip()
-
-    if not secrets.compare_digest(supplied, expected):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid access key."
-        )
-
-    return token
-
-
-def decode_image(value):
-    if not value:
-        return None
-
-    if not value.startswith("data:image/") or "," not in value:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid image format."
-        )
-
-    header, encoded = value.split(",", 1)
-
-    if ";base64" not in header.lower():
-        raise HTTPException(
-            status_code=400,
-            detail="Base64 image required."
-        )
-
-    mime = header[5:].split(";")[0].lower()
-
-    if mime not in (
-        "image/png",
-        "image/jpeg",
-        "image/webp"
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="PNG, JPG and WEBP supported."
-        )
-
-    if len(encoded) > 14 * 1024 * 1024:
-        raise HTTPException(
-            status_code=413,
-            detail="Image exceeds size limit."
-        )
-
+def run_job(job_id, req):
     try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid image data."
-        )
-
-    if not raw:
-        raise HTTPException(
-            status_code=400,
-            detail="Empty image."
-        )
-
-    return raw
-
+        minutes = req["storyDurationMinutes"]
+        seconds = req["sceneSeconds"]
+        total_seconds = minutes * 60
+        count = (total_seconds + seconds - 1) // seconds
+        prompts = split_story(req["prompt"], count)
+        clips_dir = OUT / job_id
+        clips_dir.mkdir(parents=True, exist_ok=True)
+        concat_file = clips_dir / "concat.txt"
+        for i, scene_prompt in enumerate(prompts):
+            with LOCK:
+                JOBS[job_id]["status"] = "generating"
+                JOBS[job_id]["currentScene"] = i + 1
+                JOBS[job_id]["totalScenes"] = count
+                JOBS[job_id]["progress"] = round(i / count * 90, 1)
+            content = engine_generate(scene_prompt, req.get("image") if i == 0 else None,
+                                      req["ratio"], seconds, req["quality"])
+            clip_path = clips_dir / f"scene_{i+1:04d}.mp4"
+            clip_path.write_bytes(content)
+        with concat_file.open("w", encoding="utf-8") as f:
+            for i in range(count):
+                p = clips_dir / f"scene_{i+1:04d}.mp4"
+                f.write(f"file '{p.as_posix()}'\n")
+        output = OUT / f"{job_id}.mp4"
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
+               "-c", "copy", str(output)]
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        with LOCK:
+            JOBS[job_id].update(status="completed", progress=100, videoUrl=f"/generated/{job_id}.mp4")
+    except Exception as e:
+        with LOCK:
+            JOBS[job_id].update(status="failed", error=str(e))
 
 @app.get("/")
-def home():
-    return {
-        "studio": "DREAMSTAR AI STUDIO",
-        "version": "2.0.0",
-        "status": "online",
-        "health": "/health",
-        "generation": "/api/generate"
-    }
-
+def root():
+    return {"name": "Dreamstar AI Studio Backend", "status": "online", "note": "A real ENGINE_API_URL is required for generation."}
 
 @app.get("/health")
 def health():
-    configured = bool(
-        os.getenv("HF_TOKEN")
-        and os.getenv("APP_ACCESS_KEY")
-    )
-
-    return {
-        "ok": True,
-        "service": "DREAMSTAR AI STUDIO",
-        "generation_configured": configured
-    }
-
+    return {"ok": True, "engineConfigured": bool(ENGINE_URL), "ffmpeg": shutil.which("ffmpeg") is not None}
 
 @app.post("/api/generate")
-def generate(
-    body: GenerateRequest,
-    request: Request,
-    authorization: Optional[str] = Header(default=None)
-):
+def generate(req: GenerateRequest, background: BackgroundTasks, x_api_key: Optional[str] = Header(None)):
+    auth(x_api_key)
+    job_id = str(uuid.uuid4())
+    with LOCK:
+        JOBS[job_id] = {"jobId": job_id, "status": "queued", "progress": 0, "currentScene": 0, "totalScenes": 0}
+    background.add_task(run_job, job_id, req.model_dump())
+    return {"jobId": job_id, "status": "queued", "statusUrl": f"/api/status/{job_id}"}
 
-    token = check_auth(authorization)
+@app.get("/api/status/{job_id}")
+def status(job_id: str, x_api_key: Optional[str] = Header(None)):
+    auth(x_api_key)
+    with LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found (job state is in-memory and resets on server restart)")
+    return job
 
-    model = os.getenv(
-        "HF_VIDEO_MODEL",
-        "Wan-AI/Wan2.2-TI2V-5B"
-    )
-
-    provider = os.getenv(
-        "HF_INFERENCE_PROVIDER",
-        "fal-ai"
-    )
-
-    image_data = decode_image(body.image)
-
-    try:
-        client = InferenceClient(
-            provider=provider,
-            api_key=token
-        )
-
-        frames = max(
-            17,
-            min(161, body.duration * 16 + 1)
-        )
-
-        if image_data:
-            video = client.image_to_video(
-                image=image_data,
-                prompt=body.prompt,
-                model=model,
-                num_frames=frames
-            )
-        else:
-            video = client.text_to_video(
-                prompt=body.prompt,
-                model=model,
-                num_frames=frames
-            )
-
-        if not video:
-            raise RuntimeError("Empty video response.")
-
-        if not video.startswith(b"\x00\x00\x00"):
-            logger.info("Video received from provider.")
-
-        video_id = uuid.uuid4().hex
-
-        filename = f"{video_id}.mp4"
-        filepath = VIDEO_DIR / filename
-
-        filepath.write_bytes(video)
-
-        video_url = (
-            str(request.base_url).rstrip("/")
-            + f"/videos/{filename}"
-        )
-
-        return {
-            "success": True,
-            "videoUrl": video_url,
-            "videoId": video_id,
-            "duration": body.duration,
-            "quality": body.quality,
-            "ratio": body.ratio,
-            "model": model,
-            "status": "completed"
-        }
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
-        logger.exception("Video generation failed")
-
-        safe_error = str(exc).replace(
-            token,
-            "[REDACTED]"
-        )[:400]
-
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "success": False,
-                "status": "failed",
-                "error": safe_error
-            }
-        )
-
-
-@app.get("/videos/{filename}")
-def get_video(filename: str):
-
-    if (
-        not filename.endswith(".mp4")
-        or "/" in filename
-        or "\\" in filename
-    ):
-        raise HTTPException(
-            status_code=404,
-            detail="Video not found."
-        )
-
-    filepath = VIDEO_DIR / filename
-
-    if not filepath.is_file():
-        raise HTTPException(
-            status_code=404,
-            detail="Video not found."
-        )
-
-    return FileResponse(
-        filepath,
-        media_type="video/mp4",
-        filename=filename
-    )
+@app.get("/generated/{filename}")
+def generated(filename: str):
+    from fastapi.responses import FileResponse
+    path = OUT / filename
+    if not path.exists() or path.parent != OUT:
+        raise HTTPException(404, "Video not found")
+    return FileResponse(path, media_type="video/mp4", filename=filename)
