@@ -3,6 +3,8 @@ import binascii
 import os
 import secrets
 import uuid
+import logging
+
 from pathlib import Path
 from typing import Optional
 
@@ -12,15 +14,21 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from huggingface_hub import InferenceClient
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("dreamstar")
+
 APP_DIR = Path(__file__).resolve().parent
 VIDEO_DIR = APP_DIR / "generated"
 VIDEO_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Dreamstar AI Studio Backend", version="1.0.0")
-origins = [x.strip() for x in os.getenv("CORS_ORIGINS", "*").split(",") if x.strip()]
+app = FastAPI(
+    title="DREAMSTAR AI STUDIO",
+    version="2.0.0"
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],
@@ -34,85 +42,228 @@ class GenerateRequest(BaseModel):
     duration: int = Field(default=5, ge=1, le=10)
     quality: str = "720p"
 
-def decode_image_data_url(value: str) -> bytes:
-    if not value.startswith("data:image/") or "," not in value:
-        raise HTTPException(status_code=400, detail="Image must be a PNG, JPG or WEBP data URL.")
-    header, encoded = value.split(",", 1)
-    mime = header[5:].split(";", 1)[0].lower()
-    if mime not in {"image/png", "image/jpeg", "image/webp"} or ";base64" not in header.lower():
-        raise HTTPException(status_code=400, detail="Only base64 PNG, JPG and WEBP images are supported.")
-    if len(encoded) > 14 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="Image is too large; use an image under 10 MB.")
-    try:
-        raw = base64.b64decode(encoded, validate=True)
-    except (binascii.Error, ValueError) as exc:
-        raise HTTPException(status_code=400, detail="Could not decode the uploaded image.") from exc
-    if not raw:
-        raise HTTPException(status_code=400, detail="Uploaded image is empty.")
-    return raw
 
-def check_auth(authorization: Optional[str]) -> str:
+def check_auth(authorization):
     expected = os.getenv("APP_ACCESS_KEY", "")
-    if not expected:
-        raise HTTPException(status_code=503, detail="Server setup incomplete: APP_ACCESS_KEY is missing.")
-    supplied = (authorization or "").removeprefix("Bearer ").strip()
-    if not supplied or not secrets.compare_digest(supplied, expected):
-        raise HTTPException(status_code=401, detail="Invalid backend access key.")
     token = os.getenv("HF_TOKEN", "")
-    if not token:
-        raise HTTPException(status_code=503, detail="Server setup incomplete: HF_TOKEN is missing.")
+
+    if not expected or not token:
+        raise HTTPException(
+            status_code=503,
+            detail="Backend environment setup incomplete."
+        )
+
+    supplied = (authorization or "").strip()
+
+    if supplied.lower().startswith("bearer "):
+        supplied = supplied[7:].strip()
+
+    if not secrets.compare_digest(supplied, expected):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid access key."
+        )
+
     return token
 
+
+def decode_image(value):
+    if not value:
+        return None
+
+    if not value.startswith("data:image/") or "," not in value:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid image format."
+        )
+
+    header, encoded = value.split(",", 1)
+
+    if ";base64" not in header.lower():
+        raise HTTPException(
+            status_code=400,
+            detail="Base64 image required."
+        )
+
+    mime = header[5:].split(";")[0].lower()
+
+    if mime not in (
+        "image/png",
+        "image/jpeg",
+        "image/webp"
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="PNG, JPG and WEBP supported."
+        )
+
+    if len(encoded) > 14 * 1024 * 1024:
+        raise HTTPException(
+            status_code=413,
+            detail="Image exceeds size limit."
+        )
+
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid image data."
+        )
+
+    if not raw:
+        raise HTTPException(
+            status_code=400,
+            detail="Empty image."
+        )
+
+    return raw
+
+
 @app.get("/")
-def root():
-    return {"service": "Dreamstar AI Studio Backend", "health": "/health", "generate": "POST /api/generate"}
+def home():
+    return {
+        "studio": "DREAMSTAR AI STUDIO",
+        "version": "2.0.0",
+        "status": "online",
+        "health": "/health",
+        "generation": "/api/generate"
+    }
+
 
 @app.get("/health")
 def health():
-    return {"ok": True, "service": "Dreamstar AI Studio Backend", "generation_configured": bool(os.getenv("HF_TOKEN") and os.getenv("APP_ACCESS_KEY"))}
+    configured = bool(
+        os.getenv("HF_TOKEN")
+        and os.getenv("APP_ACCESS_KEY")
+    )
+
+    return {
+        "ok": True,
+        "service": "DREAMSTAR AI STUDIO",
+        "generation_configured": configured
+    }
+
 
 @app.post("/api/generate")
-def generate(body: GenerateRequest, request: Request, authorization: Optional[str] = Header(default=None)):
+def generate(
+    body: GenerateRequest,
+    request: Request,
+    authorization: Optional[str] = Header(default=None)
+):
+
     token = check_auth(authorization)
-    model = os.getenv("HF_VIDEO_MODEL", "Wan-AI/Wan2.2-TI2V-5B")
-    provider = os.getenv("HF_INFERENCE_PROVIDER", "fal-ai")
+
+    model = os.getenv(
+        "HF_VIDEO_MODEL",
+        "Wan-AI/Wan2.2-TI2V-5B"
+    )
+
+    provider = os.getenv(
+        "HF_INFERENCE_PROVIDER",
+        "fal-ai"
+    )
+
+    image_data = decode_image(body.image)
+
     try:
-        client = InferenceClient(provider=provider, api_key=token)
-        frames = max(17, min(161, body.duration * 16 + 1))
-        if body.image:
-            video_bytes = client.image_to_video(
-                image=decode_image_data_url(body.image),
+        client = InferenceClient(
+            provider=provider,
+            api_key=token
+        )
+
+        frames = max(
+            17,
+            min(161, body.duration * 16 + 1)
+        )
+
+        if image_data:
+            video = client.image_to_video(
+                image=image_data,
                 prompt=body.prompt,
                 model=model,
-                num_frames=frames,
+                num_frames=frames
             )
         else:
-            video_bytes = client.text_to_video(
+            video = client.text_to_video(
                 prompt=body.prompt,
                 model=model,
-                num_frames=frames,
+                num_frames=frames
             )
-        if not video_bytes:
-            raise RuntimeError("The inference provider returned an empty video.")
+
+        if not video:
+            raise RuntimeError("Empty video response.")
+
+        if not video.startswith(b"\x00\x00\x00"):
+            logger.info("Video received from provider.")
+
         video_id = uuid.uuid4().hex
-        video_path = VIDEO_DIR / f"{video_id}.mp4"
-        video_path.write_bytes(video_bytes)
-        video_url = str(request.base_url).rstrip("/") + f"/videos/{video_id}.mp4"
-        return {"videoUrl": video_url, "videoId": video_id, "duration": body.duration, "model": model}
+
+        filename = f"{video_id}.mp4"
+        filepath = VIDEO_DIR / filename
+
+        filepath.write_bytes(video)
+
+        video_url = (
+            str(request.base_url).rstrip("/")
+            + f"/videos/{filename}"
+        )
+
+        return {
+            "success": True,
+            "videoUrl": video_url,
+            "videoId": video_id,
+            "duration": body.duration,
+            "quality": body.quality,
+            "ratio": body.ratio,
+            "model": model,
+            "status": "completed"
+        }
+
     except HTTPException:
         raise
+
     except Exception as exc:
-        safe = str(exc).replace(token, "[redacted]")[:500]
+        logger.exception("Video generation failed")
+
+        safe_error = str(exc).replace(
+            token,
+            "[REDACTED]"
+        )[:400]
+
         raise HTTPException(
             status_code=502,
-            detail=f"Video provider request failed: {safe}. Check provider/model availability and account limits."
-        ) from exc
+            detail={
+                "success": False,
+                "status": "failed",
+                "error": safe_error
+            }
+        )
+
 
 @app.get("/videos/{filename}")
 def get_video(filename: str):
-    if not filename.endswith(".mp4") or "/" in filename or "\\" in filename:
-        raise HTTPException(status_code=404, detail="Video not found.")
-    path = VIDEO_DIR / filename
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Video not found; generated files may be cleared when the server restarts.")
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+
+    if (
+        not filename.endswith(".mp4")
+        or "/" in filename
+        or "\\" in filename
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail="Video not found."
+        )
+
+    filepath = VIDEO_DIR / filename
+
+    if not filepath.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail="Video not found."
+        )
+
+    return FileResponse(
+        filepath,
+        media_type="video/mp4",
+        filename=filename
+    )
